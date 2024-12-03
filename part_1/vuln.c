@@ -101,6 +101,7 @@ int main(){
 				In a real exploit, you would just guess these 8 bits
 				for a 1/256 chance of success.
 				*/
+
 				leak = ((size_t) &exit >> 12) & 0xf;
 				printf("Least-significant ASLR-affected nibble of exit(): %hhx\n", leak);
 				// heap has to be initialized to get this
@@ -119,7 +120,10 @@ int main(){
 				*/
 				puts("DEBUG: Allowing all chunks to be overflowed.");
 				for (int i = 0; i < 256; i++){
-					sizes[i] = ULONG_MAX;
+					// Fun fact: Setting this to LONG_MAX actually causes nothing to be read.
+					// This is (seemingly) an exploitation defense in the Linux kernel:
+					// https://elixir.bootlin.com/linux/v6.5-rc6/source/fs/read_write.c#L357
+					sizes[i] = 0x999999; 
 				}
 				break;
 			default:

